@@ -1,0 +1,135 @@
+# ASP.NET Core
+# Build and test ASP.NET Core projects targeting .NET Core.
+# Add steps that run tests, create a NuGet package, deploy, and more:
+# https://docs.microsoft.com/azure/devops/pipelines/languages/dotnet-core
+# YAML reference:
+# https://docs.microsoft.com/en-us/azure/devops/pipelines/yaml-schema
+# dotNET tasks overview
+# https://docs.microsoft.com/en-us/azure/devops/pipelines/tasks/build/dotnet-core-cli?view=azure-devops
+
+name: $(SourceBranchName)-$(BuildID)-$(Date:yyyyMMdd)-$(Rev:.r)  # build numbering format, will eventually be replaced by gitversion
+
+trigger:
+  batch: true
+  branches:
+    include:
+      - master
+      - '*'  # must quote since "*" is a YAML reserved character; we want a string
+  paths:
+    exclude:
+      - README.md
+      - azure-pipelines.yml
+
+pr: ['*']
+
+variables:
+  SdkVersion: '2.2.203'
+  BuildConfiguration: 'Release'
+  RestoreBuildProjects: '**/*.csproj'
+  RestoreBuildProjectsTest: '**/*[Tt]ests/*.csproj'
+  #imageName: 'ubuntu-16.04'
+  imageName: 'windows-2019'
+
+jobs:
+  - job: build
+    pool:
+      vmImage: $(imageName)
+    steps:
+      - task: DotNetCoreInstaller@0
+        displayName: 'Use .NET Core sdk $(SdkVersion)'
+        inputs:
+          version: $(SdkVersion)
+          packageType: 'sdk'
+        condition: always()
+
+      - task: DotNetCoreCLI@2
+        displayName: 'dotnet restore'
+        inputs:
+          command: 'restore'
+          configuration: '$(BuildConfiguration)'
+          projects: $(RestoreBuildProjects)
+        condition: always()
+
+      - task: DotNetCoreCLI@2
+        displayName: 'dotnet build'
+        inputs:
+          command: 'build'
+          configuration: '$(BuildConfiguration)' # is actually ignored, therefore use manual arguments
+          arguments: '--no-restore -c $(BuildConfiguration)'
+        condition: succeeded()
+
+      - task: DotNetCoreCLI@2
+        displayName: 'dotnet test'
+        inputs:
+          command: 'test'
+          configuration: '$(BuildConfiguration)' # is actually ignored, therefore use manual arguments
+          projects: $(RestoreBuildProjectsTest)
+          publishTestResults: true
+          arguments: ' -c $(BuildConfiguration) --no-build --collect "Code coverage"'
+        condition: and(succeeded(), or(eq(variables['Build.Reason'], 'PullRequest'), eq(variables['Build.SourceBranch'], 'refs/heads/master')))
+
+      - task: PublishTestResults@2
+        displayName: Publish test results
+        inputs:        
+          testResultsFormat: VSTest
+          testResultsFiles: '*.trx'
+          searchFolder: $(Agent.TempDirectory)
+          buildPlatform: $(BuildPlatform)
+          buildConfiguration: $(BuildConfiguration)
+        condition: succeeded()
+        continueOnError: true
+        
+      #- task: PublishTestResults@2
+        #displayName: Publish Test Results
+        #inputs:
+          #testResultsFormat: 'xUnit'
+          #testResultsFiles: '*.xml' 
+          #searchFolder: '$(Build.SourcesDirectory)/artifacts/TestResults/$(_BuildConfig)'
+        #continueOnError: true
+        #condition: always()
+            
+      - task: DotNetCoreCLI@2
+        displayName: dotnet pack
+        inputs:
+          command: 'custom'
+          custom: 'pack'
+          arguments: '-c $(BuildConfiguration) -v d -o $(Build.ArtifactStagingDirectory)'
+        condition: always()
+
+      # Azure preset task doesnt work for unknown reason and throws TF209010, eventho it should done the same as the task above
+      #- task: DotNetCoreCLI@2
+        #displayName: dotnet pack
+        #inputs:
+          #command: 'pack'
+          #configuration: '$(BuildConfiguration)'
+          #verbosityPack: 'Diagnostic'
+          #arguments: '-o $(Build.ArtifactStagingDirectory)'
+          #packagesToPack: '$(RestoreBuildProjects)'  
+
+
+      - task: PublishBuildArtifacts@1
+        displayName: 'Publish Artifact'
+        inputs:
+          ArtifactName: 'nupkgs'
+          PathtoPublish: '$(Build.ArtifactStagingDirectory)'
+        condition: succeeded()
+      
+      # Azure doesn't support nuget push with encrypted apikey yet, therefore use nuget task for now
+      #- task: DotNetCoreCLI@2
+        #displayName: dotnet nuget push
+        #inputs:
+          #command: 'push'
+          #nuGetFeedType: 'external'
+          #packagesToPush: '$(Build.ArtifactStagingDirectory)/*.nupkg'
+          #publishFeedCredentials: 'nuget.org' # name of service connection, see .../_settings/adminservices
+      
+      - task: NuGetCommand@2
+        displayName: nuget push
+        inputs:
+          command: 'push'
+          nuGetFeedType: 'external'
+          feedsToUse: 'select'
+          packagesToPush: '$(Build.ArtifactStagingDirectory)/**/*.nupkg;!$(Build.ArtifactStagingDirectory)/**/*.symbols.nupkg'
+          publishFeedCredentials: 'nuget.org'
+        condition: and(succeeded(), or(eq(variables['Build.SourceBranch'], 'refs/heads/master'), eq(variables['Build.SourceBranch'], 'refs/heads/dev'), startsWith(variables['Build.SourceBranch'], 'refs/heads/release')))
+
